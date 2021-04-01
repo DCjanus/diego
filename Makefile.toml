@@ -1,0 +1,11 @@
+# see: https://github.com/sagiegurari/cargo-make
+
+[tasks.fmt]
+toolchain = "nightly"
+command = "cargo"
+args = ["fmt"]
+
+[tasks.fix]
+toolchain = "nightly"
+command = "cargo"
+args = ["clippy", "--allow-dirty", "--fix", "-Z", "unstable-options", "--allow-staged"]
