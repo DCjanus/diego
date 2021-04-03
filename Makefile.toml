@@ -1,5 +1,22 @@
 # see: https://github.com/sagiegurari/cargo-make
 
+[tasks.main]
+toolchain = "nightly"
+dependencies = [
+    "check-format",
+    "lint",
+    "test"
+]
+
+[tasks.check-format]
+toolchain = "nightly"
+
+[tasks.lint]
+toolchain = "nightly"
+command = "cargo"
+category = "check"
+args = ["clippy", "--all-targets", "--all-features", "--", "-D", "warnings"]
+
 [tasks.fmt]
 toolchain = "nightly"
 command = "cargo"

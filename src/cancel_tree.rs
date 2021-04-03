@@ -7,9 +7,9 @@ use std::task::{Poll, Waker};
 use spin::{Mutex, MutexGuard};
 
 #[derive(Default, Clone)]
-pub struct Context(Arc<Mutex<ContextImpl>>);
+pub struct CancelTree(Arc<Mutex<Inner>>);
 
-impl Context {
+impl CancelTree {
     pub fn root() -> Self {
         Self::default()
     }
@@ -18,12 +18,12 @@ impl Context {
         let mut inner = self.inner();
 
         match &mut *inner {
-            ContextImpl::Init { children, .. } => {
+            Inner::Init { children, .. } => {
                 let child = Self::root();
                 children.push(child.weak());
                 child
             }
-            ContextImpl::Done => Self(Arc::new(Mutex::new(ContextImpl::Done))),
+            Inner::Done => Self(Arc::new(Mutex::new(Inner::Done))),
         }
     }
 
@@ -33,10 +33,10 @@ impl Context {
             return;
         }
 
-        let context = std::mem::replace(inner.deref_mut(), ContextImpl::Done);
-        let (waiters, children) = match context {
-            ContextImpl::Init { waiters, children } => (waiters, children),
-            ContextImpl::Done => {
+        let cancel_tree = std::mem::replace(inner.deref_mut(), Inner::Done);
+        let (waiters, children) = match cancel_tree {
+            Inner::Init { waiters, children } => (waiters, children),
+            Inner::Done => {
                 unreachable!()
             }
         };
@@ -61,38 +61,38 @@ impl Context {
         let mut inner = self.inner();
 
         let waiters = match inner.deref_mut() {
-            ContextImpl::Init { waiters, .. } => waiters,
-            ContextImpl::Done => return Waiter::done(),
+            Inner::Init { waiters, .. } => waiters,
+            Inner::Done => return Waiter::done(),
         };
         let waiter = Waiter::init();
         waiters.push(waiter.weak());
         waiter
     }
 
-    fn inner(&self) -> MutexGuard<ContextImpl> {
+    fn inner(&self) -> MutexGuard<Inner> {
         self.0.lock()
     }
 
-    fn weak(&self) -> Weak<Mutex<ContextImpl>> {
+    fn weak(&self) -> Weak<Mutex<Inner>> {
         Arc::downgrade(&self.0)
     }
 }
 
-enum ContextImpl {
+enum Inner {
     Init {
         waiters: Vec<Weak<Mutex<WaiterImpl>>>,
-        children: Vec<Weak<Mutex<ContextImpl>>>,
+        children: Vec<Weak<Mutex<Inner>>>,
     },
     Done,
 }
 
-impl ContextImpl {
+impl Inner {
     fn is_done(&self) -> bool {
         matches!(self, Self::Done)
     }
 }
 
-impl Default for ContextImpl {
+impl Default for Inner {
     fn default() -> Self {
         Self::Init {
             waiters: vec![],
@@ -182,7 +182,7 @@ mod tests {
     }
 
     async fn multi_waiter() {
-        let root = Context::root();
+        let root = CancelTree::root();
         let child = root.child();
 
         tokio::spawn(async move {
@@ -195,7 +195,7 @@ mod tests {
     }
 
     async fn multi_layer() {
-        let root = Context::root();
+        let root = CancelTree::root();
         let child = root.child();
         let grandchild = child.child();
         tokio::spawn(async move {
@@ -206,13 +206,13 @@ mod tests {
     }
 
     async fn wait_after_done() {
-        let root = Context::root();
+        let root = CancelTree::root();
         root.done();
         root.wait().await;
     }
 
     async fn child_after_done() {
-        let root = Context::root();
+        let root = CancelTree::root();
         root.done();
         let child = root.child();
         child.wait().await;
