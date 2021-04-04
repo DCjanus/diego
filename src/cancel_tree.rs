@@ -1,72 +1,59 @@
 use std::future::Future;
-use std::ops::DerefMut;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
 use std::task::{Poll, Waker};
 
 use spin::{Mutex, MutexGuard};
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct CancelTree(Arc<Mutex<Inner>>);
 
 impl CancelTree {
     pub fn root() -> Self {
-        Self::default()
+        Self::construct(Inner {
+            waiters: vec![],
+            children: vec![],
+            canceled: false,
+        })
     }
 
-    pub fn child(&self) -> Self {
+    pub fn new_child(&self) -> Self {
         let mut inner = self.inner();
 
-        match &mut *inner {
-            Inner::Init { children, .. } => {
-                let child = Self::root();
-                children.push(child.weak());
-                child
-            }
-            Inner::Done => Self(Arc::new(Mutex::new(Inner::Done))),
-        }
-    }
-
-    pub fn done(&self) {
-        let mut inner = self.inner();
-        if inner.is_done() {
-            return;
+        if inner.canceled {
+            return Self::construct(Inner {
+                waiters: vec![],
+                children: vec![],
+                canceled: true,
+            });
         }
 
-        let cancel_tree = std::mem::replace(inner.deref_mut(), Inner::Done);
-        let (waiters, children) = match cancel_tree {
-            Inner::Init { waiters, children } => (waiters, children),
-            Inner::Done => {
-                unreachable!()
-            }
-        };
-
-        children
-            .into_iter()
-            .filter_map(|x| x.upgrade())
-            .map(Self)
-            .for_each(|x| x.done());
-
-        waiters
-            .into_iter()
-            .filter_map(|x| x.upgrade())
-            .for_each(|x| x.lock().done());
+        let child = Self::root();
+        inner.children.push(child.weak());
+        child
     }
 
-    pub fn is_done(&self) -> bool {
-        self.inner().is_done()
+    pub fn cancel(&self) {
+        self.inner().cancel()
+    }
+
+    pub fn canceled(&self) -> bool {
+        self.inner().canceled
     }
 
     pub fn wait(&self) -> impl Future<Output = ()> {
         let mut inner = self.inner();
+        if inner.canceled {
+            return Waiter::construct(State::Canceled);
+        }
 
-        let waiters = match inner.deref_mut() {
-            Inner::Init { waiters, .. } => waiters,
-            Inner::Done => return Waiter::done(),
-        };
-        let waiter = Waiter::init();
-        waiters.push(waiter.weak());
+        let waiter = Waiter::construct(State::Init);
+        inner.waiters.push(waiter.weak());
         waiter
+    }
+
+    fn construct(inner: Inner) -> Self {
+        Self(Arc::new(Mutex::new(inner)))
     }
 
     fn inner(&self) -> MutexGuard<Inner> {
@@ -78,41 +65,45 @@ impl CancelTree {
     }
 }
 
-enum Inner {
-    Init {
-        waiters: Vec<Weak<Mutex<WaiterImpl>>>,
-        children: Vec<Weak<Mutex<Inner>>>,
-    },
-    Done,
+struct Inner {
+    waiters: Vec<Weak<Mutex<State>>>,
+    children: Vec<Weak<Mutex<Inner>>>,
+    canceled: bool,
 }
 
 impl Inner {
-    fn is_done(&self) -> bool {
-        matches!(self, Self::Done)
-    }
-}
-
-impl Default for Inner {
-    fn default() -> Self {
-        Self::Init {
-            waiters: vec![],
-            children: vec![],
+    fn cancel(&mut self) {
+        if self.canceled {
+            return;
         }
+        self.canceled = true;
+
+        std::mem::take(&mut self.children)
+            .into_iter()
+            .filter_map(|x| x.upgrade())
+            .for_each(|x| x.lock().cancel());
+
+        std::mem::take(&mut self.waiters)
+            .into_iter()
+            .filter_map(|x| x.upgrade())
+            .for_each(|x| x.lock().done());
     }
 }
 
-struct Waiter(Arc<Mutex<WaiterImpl>>);
+impl Drop for Inner {
+    fn drop(&mut self) {
+        self.cancel()
+    }
+}
+
+struct Waiter(Arc<Mutex<State>>);
 
 impl Waiter {
-    fn init() -> Self {
-        Waiter(Arc::new(Mutex::new(WaiterImpl::Init)))
+    fn construct(state: State) -> Self {
+        Self(Arc::new(Mutex::new(state)))
     }
 
-    fn done() -> Self {
-        Waiter(Arc::new(Mutex::new(WaiterImpl::Done)))
-    }
-
-    fn weak(&self) -> Weak<Mutex<WaiterImpl>> {
+    fn weak(&self) -> Weak<Mutex<State>> {
         Arc::downgrade(&self.0)
     }
 }
@@ -124,25 +115,25 @@ impl Future for Waiter {
         let mut guard = self.0.lock();
 
         match &*guard {
-            WaiterImpl::Done => Poll::Ready(()),
+            State::Canceled => Poll::Ready(()),
             _ => {
-                *guard = WaiterImpl::Wait(cx.waker().clone());
+                *guard = State::Running(cx.waker().clone());
                 Poll::Pending
             }
         }
     }
 }
 
-enum WaiterImpl {
+enum State {
     Init,
-    Wait(Waker),
-    Done,
+    Running(Waker),
+    Canceled,
 }
 
-impl WaiterImpl {
+impl State {
     fn done(&mut self) {
-        let value = std::mem::replace(self, Self::Done);
-        if let Self::Wait(waker) = value {
+        let value = std::mem::replace(self, Self::Canceled);
+        if let Self::Running(waker) = value {
             waker.wake()
         }
     }
@@ -183,11 +174,11 @@ mod tests {
 
     async fn multi_waiter() {
         let root = CancelTree::root();
-        let child = root.child();
+        let child = root.new_child();
 
         tokio::spawn(async move {
             sleep(BASE).await;
-            root.done()
+            root.cancel()
         });
 
         let tasks = (1..=5).into_iter().map(|_| child.wait());
@@ -196,25 +187,42 @@ mod tests {
 
     async fn multi_layer() {
         let root = CancelTree::root();
-        let child = root.child();
-        let grandchild = child.child();
+        let child = root.new_child();
+        let grandchild = child.new_child();
         tokio::spawn(async move {
             sleep(BASE).await;
-            root.done();
+            root.cancel();
         });
         grandchild.wait().await;
     }
 
     async fn wait_after_done() {
         let root = CancelTree::root();
-        root.done();
+        root.cancel();
         root.wait().await;
     }
 
     async fn child_after_done() {
         let root = CancelTree::root();
-        root.done();
-        let child = root.child();
+        root.cancel();
+        let child = root.new_child();
+        child.wait().await;
+    }
+
+    async fn drop_canceled() {
+        let root1 = CancelTree::root();
+        let root2 = root1.clone();
+        let child = root1.new_child();
+        tokio::spawn(async move {
+            sleep(BASE).await;
+            drop(root1);
+        });
+
+        tokio::spawn(async move {
+            sleep(BASE * 2).await;
+            drop(root2);
+        });
+
         child.wait().await;
     }
 
@@ -225,6 +233,7 @@ mod tests {
             time_base(BASE..BASE + MISS, multi_layer()),
             time_base(STAT..MISS, wait_after_done()),
             time_base(STAT..MISS, child_after_done()),
+            time_base(BASE * 2..BASE * 2 + MISS, drop_canceled()),
         ])
         .await;
     }
