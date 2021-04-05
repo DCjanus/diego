@@ -24,6 +24,7 @@ impl Group {
         }
 
         let waiter = Waiter::construct(State::Init);
+        inner.waiters.retain(|x| x.strong_count() > 0);
         inner.waiters.push(waiter.weak());
         waiter
     }

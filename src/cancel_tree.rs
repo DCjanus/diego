@@ -29,6 +29,7 @@ impl CancelTree {
         }
 
         let child = Self::root();
+        inner.children.retain(|x| x.strong_count() > 0);
         inner.children.push(child.weak());
         child
     }
@@ -48,6 +49,7 @@ impl CancelTree {
         }
 
         let waiter = Waiter::construct(State::Init);
+        inner.waiters.retain(|x| x.strong_count() > 0);
         inner.waiters.push(waiter.weak());
         waiter
     }
