@@ -32,7 +32,7 @@ fn time_base(
 }
 
 async fn multi_waiter() {
-    let root = CancelTree::root();
+    let root = CancelTree::new();
     let child = root.new_child();
 
     tokio::spawn(async move {
@@ -45,7 +45,7 @@ async fn multi_waiter() {
 }
 
 async fn multi_layer() {
-    let root = CancelTree::root();
+    let root = CancelTree::new();
     let child = root.new_child();
     let grandchild = child.new_child();
     tokio::spawn(async move {
@@ -56,20 +56,20 @@ async fn multi_layer() {
 }
 
 async fn wait_after_done() {
-    let root = CancelTree::root();
+    let root = CancelTree::new();
     root.cancel();
     root.wait().await;
 }
 
 async fn child_after_done() {
-    let root = CancelTree::root();
+    let root = CancelTree::new();
     root.cancel();
     let child = root.new_child();
     child.wait().await;
 }
 
 async fn drop_canceled() {
-    let root1 = CancelTree::root();
+    let root1 = CancelTree::new();
     let root2 = root1.clone();
     let child = root1.new_child();
     tokio::spawn(async move {

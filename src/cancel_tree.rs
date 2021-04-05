@@ -5,16 +5,12 @@ use spin::{Mutex, MutexGuard};
 
 use crate::waiter::{State, Waiter};
 
-#[derive(Clone)]
+#[derive(Default, Clone)]
 pub struct CancelTree(Arc<Mutex<Inner>>);
 
 impl CancelTree {
-    pub fn root() -> Self {
-        Self::construct(Inner {
-            waiters: vec![],
-            children: vec![],
-            canceled: false,
-        })
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn new_child(&self) -> Self {
@@ -28,7 +24,7 @@ impl CancelTree {
             });
         }
 
-        let child = Self::root();
+        let child = Self::new();
         inner.children.retain(|x| x.strong_count() > 0);
         inner.children.push(child.weak());
         child
@@ -67,6 +63,7 @@ impl CancelTree {
     }
 }
 
+#[derive(Default)]
 struct Inner {
     waiters: Vec<Weak<Mutex<State>>>,
     children: Vec<Weak<Mutex<Inner>>>,
