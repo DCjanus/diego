@@ -1,9 +1,9 @@
+use std::future::Future;
 use std::sync::{Arc, Weak};
 
 use spin::Mutex;
 
 use crate::waiter::{State, Waiter};
-use std::future::Future;
 
 #[derive(Default, Clone)]
 pub struct Group(Arc<Mutex<Inner>>);
@@ -27,6 +27,10 @@ impl Group {
         inner.waiters.retain(|x| x.strong_count() > 0);
         inner.waiters.push(waiter.weak());
         waiter
+    }
+
+    pub fn worker_count(&self) -> usize {
+        self.0.lock().count
     }
 }
 
